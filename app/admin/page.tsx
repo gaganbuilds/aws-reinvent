@@ -105,14 +105,30 @@ export default function AdminPage() {
   }, []);
 
   useEffect(() => {
-    if (!session) return;
-    supabase.rpc("my_role").then(async ({ data }) => {
-      setRole((data as string) ?? null);
-      if (data === "admin") {
-        loadRows();
-        loadMods();
+    if (!session) {
+      setRole(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data, error } = await supabase.rpc("my_role");
+        if (cancelled) return;
+        if (error || !data) {
+          setRole(null);
+          return;
+        }
+        const userRole = (data as string) ?? null;
+        setRole(userRole);
+        if (userRole === "admin") {
+          loadRows();
+          loadMods();
+        }
+      } catch {
+        if (!cancelled) setRole(null);
       }
-    });
+    })();
+    return () => { cancelled = true; };
   }, [session, loadMods, loadRows]);
 
   async function addMod(e: React.FormEvent) {

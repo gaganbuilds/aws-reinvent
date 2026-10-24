@@ -23,7 +23,21 @@ export default function SiteNav({ solid = false }: { solid?: boolean }) {
 
   useEffect(() => {
     if (!session) { setRole(null); return; }
-    supabase.rpc("my_role").then(({ data }) => setRole((data as string) ?? null));
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data, error } = await supabase.rpc("my_role");
+        if (cancelled) return;
+        if (error || !data) {
+          setRole(null);
+        } else {
+          setRole((data as string) ?? null);
+        }
+      } catch {
+        if (!cancelled) setRole(null);
+      }
+    })();
+    return () => { cancelled = true; };
   }, [session]);
 
   async function logout() {

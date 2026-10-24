@@ -45,32 +45,41 @@ create table if not exists public.application_decisions (
 
 -- Helpers -------------------------------------------------------------
 create or replace function public.is_staff() returns boolean
-language sql stable security definer set search_path = public as $$
-  select current_user in ('postgres', 'supabase_admin')
-      or exists (select 1 from public.user_roles where user_id = auth.uid());
-$$;
-
-create or replace function public.my_role() returns text
-language sql stable security definer set search_path = public as $$
-  select coalesce(
-    (select role from public.user_roles where user_id = auth.uid() limit 1),
-    case when current_user in ('postgres', 'supabase_admin') then 'admin' else null end
+language sql stable security definer set search_path = public, pg_temp as $$
+  select exists (
+    select 1
+    from public.user_roles
+    where user_id = auth.uid()
+      and role in ('admin', 'moderator')
   );
 $$;
 
+create or replace function public.my_role() returns text
+language sql stable security definer set search_path = public, pg_temp as $$
+  select role
+  from public.user_roles
+  where user_id = auth.uid()
+  limit 1;
+$$;
+
 create or replace function public.is_moderator() returns boolean
-language sql stable security definer set search_path = public as $$
-  select public.is_staff();
+language sql stable security definer set search_path = public, pg_temp as $$
+  select exists (
+    select 1
+    from public.user_roles
+    where user_id = auth.uid()
+      and role in ('admin', 'moderator')
+  );
 $$;
 
 create or replace function public.applications_open() returns boolean
-language sql stable security definer set search_path = public as $$
+language sql stable security definer set search_path = public, pg_temp as $$
   select applications_open from public.event_settings where id = 1;
 $$;
 
 -- Collision-resistant human-readable Attendee ID generator (Format: REIM-XXXXXXXX)
 create or replace function public.generate_attendee_id() returns text
-language plpgsql as $$
+language plpgsql set search_path = public, pg_temp as $$
 declare
   new_id text;
   done boolean := false;
@@ -85,7 +94,7 @@ $$;
 
 -- WhatsApp link is returned ONLY to the user whose application is accepted.
 create or replace function public.get_whatsapp_link() returns text
-language sql stable security definer set search_path = public as $$
+language sql stable security definer set search_path = public, pg_temp as $$
   select s.whatsapp_group_url
   from public.event_settings s
   where exists (select 1 from public.applications a where a.user_id = auth.uid() and a.status = 'accepted');
@@ -93,13 +102,17 @@ $$;
 
 -- Atomically updates status, generates persistent attendee pass on approval, and logs decision
 create or replace function public.review_application(app_id uuid, new_status text, note text default null)
-returns void language plpgsql security definer set search_path = public as $$
+returns void language plpgsql security definer set search_path = public, pg_temp as $$
 declare
   v_current_status text;
   v_current_attendee_id text;
 begin
-  if not public.is_staff() then raise exception 'not allowed'; end if;
-  if new_status not in ('accepted','rejected','pending') then raise exception 'bad status'; end if;
+  if auth.uid() is null or not public.is_staff() then
+    raise exception 'Unauthorized: Staff permissions required';
+  end if;
+  if new_status not in ('accepted','rejected','pending') then
+    raise exception 'bad status';
+  end if;
 
   select status, attendee_id into v_current_status, v_current_attendee_id
   from public.applications
@@ -128,12 +141,14 @@ $$;
 
 -- Staff pass recovery RPC
 create or replace function public.generate_missing_pass(app_id uuid)
-returns text language plpgsql security definer set search_path = public as $$
+returns text language plpgsql security definer set search_path = public, pg_temp as $$
 declare
   v_status text;
   v_attendee_id text;
 begin
-  if not public.is_staff() then raise exception 'not allowed'; end if;
+  if auth.uid() is null or not public.is_staff() then
+    raise exception 'Unauthorized: Staff permissions required';
+  end if;
 
   select status, attendee_id into v_status, v_attendee_id
   from public.applications
@@ -155,12 +170,14 @@ $$;
 
 -- Batch backfill RPC for existing accepted applicants
 create or replace function public.backfill_attendee_passes()
-returns integer language plpgsql security definer set search_path = public as $$
+returns integer language plpgsql security definer set search_path = public, pg_temp as $$
 declare
   v_count integer := 0;
   r record;
 begin
-  if not public.is_staff() then raise exception 'not allowed'; end if;
+  if auth.uid() is null or not public.is_staff() then
+    raise exception 'Unauthorized: Staff permissions required';
+  end if;
 
   for r in select id from public.applications where status = 'accepted' and attendee_id is null loop
     update public.applications
@@ -176,35 +193,80 @@ $$;
 -- Staff moderator management helpers
 create or replace function public.list_moderators()
 returns table (user_id uuid, email text, added_at timestamptz)
-language sql stable security definer set search_path = public as $$
+language plpgsql stable security definer set search_path = public, pg_temp as $$
+begin
+  if auth.uid() is null or public.my_role() != 'admin' then
+    raise exception 'Unauthorized: Only admins can list moderators';
+  end if;
+
+  return query
   select r.user_id, u.email::text, r.created_at as added_at
   from public.user_roles r
   join auth.users u on u.id = r.user_id
   where r.role = 'moderator'
   order by r.created_at desc;
+end;
 $$;
 
 create or replace function public.add_moderator(p_email text)
-returns void language plpgsql security definer set search_path = public as $$
+returns void language plpgsql security definer set search_path = public, pg_temp as $$
 declare
   target_user_id uuid;
+  target_existing_role text;
+  clean_email text;
 begin
-  if public.my_role() != 'admin' then raise exception 'not allowed'; end if;
-  select id into target_user_id from auth.users where lower(email) = lower(trim(p_email));
+  if auth.uid() is null or public.my_role() != 'admin' then
+    raise exception 'Unauthorized: Only admins can add moderators';
+  end if;
+
+  clean_email := lower(trim(coalesce(p_email, '')));
+  if clean_email = '' then
+    raise exception 'Email address cannot be empty';
+  end if;
+
+  select id into target_user_id
+  from auth.users
+  where lower(email) = clean_email
+  limit 1;
+
   if target_user_id is null then
     raise exception 'User not found. They must sign in once first.';
   end if;
+
+  select role into target_existing_role
+  from public.user_roles
+  where user_id = target_user_id;
+
+  if target_existing_role = 'admin' then
+    raise exception 'User is already an administrator.';
+  end if;
+
+  if target_existing_role = 'moderator' then
+    return;
+  end if;
+
   insert into public.user_roles (user_id, role)
   values (target_user_id, 'moderator')
-  on conflict (user_id) do update set role = 'moderator';
+  on conflict (user_id) do update
+    set role = 'moderator'
+    where public.user_roles.role != 'admin';
 end;
 $$;
 
 create or replace function public.remove_moderator(p_user_id uuid)
-returns void language plpgsql security definer set search_path = public as $$
+returns void language plpgsql security definer set search_path = public, pg_temp as $$
 begin
-  if public.my_role() != 'admin' then raise exception 'not allowed'; end if;
-  delete from public.user_roles where user_id = p_user_id and role = 'moderator';
+  if auth.uid() is null or public.my_role() != 'admin' then
+    raise exception 'Unauthorized: Only admins can remove moderators';
+  end if;
+
+  if p_user_id is null then
+    raise exception 'Invalid user ID';
+  end if;
+
+  delete from public.user_roles
+  where user_id = p_user_id
+    and role = 'moderator';
 end;
 $$;
 
@@ -235,21 +297,42 @@ alter table public.applications enable row level security;
 alter table public.application_decisions enable row level security;
 alter table public.attendee_scan_events enable row level security;
 
--- applicants: read their own row, insert their own row as pending only. No client updates.
+-- user_roles: users can only read their own role; no direct client writes permitted
+create policy "own role read" on public.user_roles for select using (user_id = auth.uid());
+revoke insert, update, delete on public.user_roles from anon, authenticated;
+grant select on public.user_roles to authenticated;
+
+-- applications: read own, staff read all, insert pending only. No client updates or deletes.
 create policy "own application read" on public.applications for select using (user_id = auth.uid());
 create policy "staff read all" on public.applications for select using (public.is_staff());
 create policy "own application insert" on public.applications for insert
-  with check (user_id = auth.uid() and status = 'pending' and public.applications_open());
+  with check (
+    user_id = auth.uid()
+    and status = 'pending'
+    and public.applications_open()
+    and attendee_id is null
+    and checked_in_at is null
+    and checked_in_by is null
+    and reviewed_by is null
+    and reviewed_at is null
+  );
+revoke update, delete on public.applications from anon, authenticated;
+grant select, insert on public.applications to authenticated;
 
+-- application_decisions: only staff can read decisions
 create policy "staff read decisions" on public.application_decisions for select using (public.is_staff());
-create policy "own role read" on public.user_roles for select using (user_id = auth.uid());
+revoke insert, update, delete on public.application_decisions from anon, authenticated;
+grant select on public.application_decisions to authenticated;
 
+-- attendee_scan_events: staff only
 create policy "staff read scan events" on public.attendee_scan_events for select using (public.is_staff());
 create policy "staff insert scan events" on public.attendee_scan_events for insert with check (public.is_staff());
+revoke update, delete on public.attendee_scan_events from anon, authenticated;
+grant select, insert on public.attendee_scan_events to authenticated;
 
 -- Atomic check-in RPC function
 create or replace function public.check_in_attendee(p_qr_payload text)
-returns jsonb language plpgsql security definer set search_path = public as $$
+returns jsonb language plpgsql security definer set search_path = public, pg_temp as $$
 declare
   v_clean_payload text;
   v_candidate_id text;
@@ -259,7 +342,7 @@ declare
   v_staff_email text;
   v_payload_hash text;
 begin
-  if not public.is_staff() then
+  if auth.uid() is null or not public.is_staff() then
     raise exception 'Unauthorized: Staff permissions required';
   end if;
 
@@ -422,7 +505,13 @@ returns table (
   checked_in_at timestamptz,
   checked_in_by uuid,
   checked_in_by_email text
-) language sql stable security definer set search_path = public as $$
+) language plpgsql stable security definer set search_path = public, pg_temp as $$
+begin
+  if auth.uid() is null or not public.is_staff() then
+    raise exception 'Unauthorized: Staff permissions required';
+  end if;
+
+  return query
   select
     e.id as event_id,
     e.scanned_at,
@@ -445,13 +534,13 @@ returns table (
   left join public.applications a on a.id = e.application_id or (e.attendee_id is not null and a.attendee_id = e.attendee_id)
   left join auth.users u_scanner on u_scanner.id = e.scanned_by
   left join auth.users u_checkin on u_checkin.id = a.checked_in_by
-  where public.is_staff()
   order by e.scanned_at desc
   limit coalesce(p_limit, 500);
+end;
 $$;
 
 create or replace function public.get_checkin_stats()
-returns jsonb language plpgsql stable security definer set search_path = public as $$
+returns jsonb language plpgsql stable security definer set search_path = public, pg_temp as $$
 declare
   v_total_registrations int;
   v_accepted_count int;
@@ -462,7 +551,9 @@ declare
   v_invalid_scans int;
   v_not_approved_scans int;
 begin
-  if not public.is_staff() then raise exception 'not allowed'; end if;
+  if auth.uid() is null or not public.is_staff() then
+    raise exception 'Unauthorized: Staff permissions required';
+  end if;
 
   select count(*) into v_total_registrations from public.applications;
   select count(*) into v_accepted_count from public.applications where status = 'accepted';
@@ -488,19 +579,47 @@ end;
 $$;
 
 -- Permissions
-grant execute on function public.is_staff() to authenticated, anon;
+revoke execute on function public.is_staff() from public, anon;
+grant execute on function public.is_staff() to authenticated;
+
+revoke execute on function public.my_role() from public, anon;
 grant execute on function public.my_role() to authenticated;
+
+revoke execute on function public.is_moderator() from public, anon;
 grant execute on function public.is_moderator() to authenticated;
+
 grant execute on function public.applications_open() to authenticated, anon;
+
+revoke execute on function public.generate_attendee_id() from public, anon;
 grant execute on function public.generate_attendee_id() to authenticated;
+
+revoke execute on function public.get_whatsapp_link() from public, anon;
 grant execute on function public.get_whatsapp_link() to authenticated;
+
+revoke execute on function public.review_application(uuid, text, text) from public, anon;
 grant execute on function public.review_application(uuid, text, text) to authenticated;
+
+revoke execute on function public.generate_missing_pass(uuid) from public, anon;
 grant execute on function public.generate_missing_pass(uuid) to authenticated;
+
+revoke execute on function public.backfill_attendee_passes() from public, anon;
 grant execute on function public.backfill_attendee_passes() to authenticated;
+
+revoke execute on function public.list_moderators() from public, anon;
 grant execute on function public.list_moderators() to authenticated;
+
+revoke execute on function public.add_moderator(text) from public, anon;
 grant execute on function public.add_moderator(text) to authenticated;
+
+revoke execute on function public.remove_moderator(uuid) from public, anon;
 grant execute on function public.remove_moderator(uuid) to authenticated;
+
+revoke execute on function public.check_in_attendee(text) from public, anon;
 grant execute on function public.check_in_attendee(text) to authenticated;
+
+revoke execute on function public.list_scan_events(int) from public, anon;
 grant execute on function public.list_scan_events(int) to authenticated;
+
+revoke execute on function public.get_checkin_stats() from public, anon;
 grant execute on function public.get_checkin_stats() to authenticated;
 

@@ -62,8 +62,26 @@ export default function ModeratorPage() {
   }, []);
 
   useEffect(() => {
-    if (!session) return;
-    supabase.rpc("is_moderator").then(({ data }) => { setAllowed(!!data); if (data) load(); });
+    if (!session) {
+      setAllowed(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data, error } = await supabase.rpc("is_moderator");
+        if (cancelled) return;
+        if (error || !data) {
+          setAllowed(false);
+        } else {
+          setAllowed(true);
+          load();
+        }
+      } catch {
+        if (!cancelled) setAllowed(false);
+      }
+    })();
+    return () => { cancelled = true; };
   }, [session, load]);
 
   async function decide(id: string, decision: "accepted" | "rejected") {
