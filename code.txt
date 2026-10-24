@@ -1,0 +1,1396 @@
+﻿
+===== app\admin\page.tsx =====
+
+"use client";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { toast } from "sonner";
+import SiteNav from "@/components/SiteNav";
+import OtpLogin from "@/components/OtpLogin";
+import { useSession } from "@/components/useSession";
+import { supabase } from "@/lib/supabase";
+
+type Row = { id: string; full_name: string; email: string; phone: string | null; city: string | null; college: string | null; year_of_study: string | null; branch: string | null; builder_id: string; consent: boolean | null; status: string; submitted_at: string };
+type Mod = { user_id: string; email: string; added_at: string };
+
+function group(rows: Row[], key: "college" | "city" | "year_of_study" | "branch"): [string, number][] {
+  const m = new Map<string, number>();
+  rows.forEach((r) => {
+    const k = (r[key] ?? "").toString().trim() || "Not given";
+    m.set(k, (m.get(k) ?? 0) + 1);
+  });
+  return [...m.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8);
+}
+
+function perDay(rows: Row[]): [string, number][] {
+  const m = new Map<string, number>();
+  rows.forEach((r) => {
+    const d = new Date(r.submitted_at).toLocaleDateString("en-CA");
+    m.set(d, (m.get(d) ?? 0) + 1);
+  });
+  return [...m.entries()].sort((a, b) => a[0].localeCompare(b[0])).slice(-14);
+}
+
+function Bars({ title, data }: { title: string; data: [string, number][] }) {
+  const max = Math.max(1, ...data.map(([, n]) => n));
+  return (
+    <div className="rounded-xl border border-line bg-panel p-4">
+      <h3 className="mb-3 text-sm font-semibold">{title}</h3>
+      {data.length === 0 ? <p className="text-sm text-slate-400">No data yet.</p> : (
+        <ul className="space-y-2">
+          {data.map(([k, n]) => (
+            <li key={k} className="text-sm">
+              <div className="flex justify-between"><span className="truncate pr-2">{k}</span><span className="text-slate-400">{n}</span></div>
+              <div className="mt-1 h-2 rounded bg-white/10"><div className="h-2 rounded bg-accent" style={{ width: `${(n / max) * 100}%` }} /></div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+export default function AdminPage() {
+  const { session, loading } = useSession();
+  const [role, setRole] = useState<string | null | undefined>(undefined);
+  const [rows, setRows] = useState<Row[]>([]);
+  const [mods, setMods] = useState<Mod[]>([]);
+  const [modEmail, setModEmail] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const loadMods = useCallback(async () => {
+    const { data, error } = await supabase.rpc("list_moderators");
+    if (error) return toast.error(error.message);
+    setMods((data ?? []) as Mod[]);
+  }, []);
+
+  useEffect(() => {
+    if (!session) return;
+    supabase.rpc("my_role").then(async ({ data }) => {
+      setRole((data as string) ?? null);
+      if (data === "admin") {
+        const res = await supabase.from("applications").select("*").order("submitted_at", { ascending: false });
+        if (res.error) return toast.error(res.error.message);
+        setRows(res.data as Row[]);
+        loadMods();
+      }
+    });
+  }, [session, loadMods]);
+
+  async function addMod(e: React.FormEvent) {
+    e.preventDefault();
+    const email = modEmail.trim();
+    if (!email) return;
+    setBusy(true);
+    const { error } = await supabase.rpc("add_moderator", { p_email: email });
+    setBusy(false);
+    if (error) return toast.error(error.message);
+    toast.success("Moderator added");
+    setModEmail("");
+    loadMods();
+  }
+
+  async function removeMod(id: string, email: string) {
+    if (!confirm(`Remove ${email} as a moderator?`)) return;
+    const { error } = await supabase.rpc("remove_moderator", { p_user_id: id });
+    if (error) return toast.error(error.message);
+    toast.success("Moderator removed");
+    loadMods();
+  }
+
+  const count = (s: string) => rows.filter((r) => r.status === s).length;
+  const byCollege = useMemo(() => group(rows, "college"), [rows]);
+  const byCity = useMemo(() => group(rows, "city"), [rows]);
+  const byYear = useMemo(() => group(rows, "year_of_study"), [rows]);
+  const byBranch = useMemo(() => group(rows, "branch"), [rows]);
+  const days = useMemo(() => perDay(rows), [rows]);
+
+  function exportCsv() {
+    const esc = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+    const head = ["Name", "Email", "Phone", "City", "College", "Year", "Branch", "Builder ID", "Consent", "Status", "Submitted"];
+    const lines = rows.map((r) => [r.full_name, r.email, r.phone, r.city, r.college, r.year_of_study, r.branch, r.builder_id, r.consent ? "Yes" : "No", r.status, r.submitted_at].map(esc).join(","));
+    const blob = new Blob([[head.join(","), ...lines].join("\n")], { type: "text/csv" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob); a.download = "applications.csv"; a.click();
+  }
+
+  return (
+    <>
+      <SiteNav solid />
+      <main className="mx-auto max-w-6xl px-5 py-10">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          {role === "admin" ? <h1 className="text-2xl font-bold">Admin overview</h1> : <span />}
+          {role === "admin" && <button onClick={exportCsv} className="rounded-lg border border-line px-4 py-2 text-sm hover:bg-white/5">Export CSV</button>}
+        </div>
+        {loading ? <p className="mt-6 text-slate-400">Loading...</p>
+          : !session ? <div className="mt-6 max-w-sm rounded-2xl border border-line bg-panel p-6"><OtpLogin title="Sign in" onDone={() => {}} /></div>
+          : role === undefined ? <p className="mt-6 text-slate-400">Checking access...</p>
+          : role !== "admin" ? <p className="mt-6 text-slate-400">404 â€“ This page could not be found.</p>
+          : (
+            <>
+              <p className="mt-2 text-sm text-slate-400">Applications are view-only here. Moderators review and decide them.</p>
+              <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                {[["Total registrations", rows.length], ["Pending", count("pending")], ["Accepted", count("accepted")], ["Rejected", count("rejected")]].map(([k, v]) => (
+                  <div key={k as string} className="rounded-xl border border-line bg-panel p-4"><p className="text-xs text-slate-400">{k}</p><p className="text-2xl font-bold">{v}</p></div>
+                ))}
+              </div>
+
+              <section className="mt-6 rounded-xl border border-line bg-panel p-4">
+                <h2 className="text-sm font-semibold">Moderators</h2>
+                <p className="mt-1 text-xs text-slate-400">The person must log in once on the registration page before you can add them.</p>
+                <form onSubmit={addMod} className="mt-3 flex flex-wrap gap-3">
+                  <input type="email" required className="min-w-56 flex-1 rounded-lg border border-line bg-ink px-3 py-2 text-sm" placeholder="moderator@email.com" value={modEmail} onChange={(e) => setModEmail(e.target.value)} />
+                  <button disabled={busy} className="rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{busy ? "Adding..." : "Add moderator"}</button>
+                </form>
+                <ul className="mt-4 divide-y divide-line text-sm">
+                  {mods.map((m) => (
+                    <li key={m.user_id} className="flex items-center justify-between py-2">
+                      <span>{m.email}</span>
+                      <button onClick={() => removeMod(m.user_id, m.email)} className="rounded border border-red-500/50 px-3 py-1 text-xs text-red-300 hover:bg-red-500/10">Remove</button>
+                    </li>
+                  ))}
+                  {mods.length === 0 && <li className="py-2 text-slate-400">No moderators yet.</li>}
+                </ul>
+              </section>
+
+              <div className="mt-6 grid gap-4 md:grid-cols-2">
+                <Bars title="Registrations per day (last 14 days)" data={days} />
+                <Bars title="Top colleges" data={byCollege} />
+                <Bars title="Top cities" data={byCity} />
+                <Bars title="Year of study" data={byYear} />
+                <Bars title="Branch" data={byBranch} />
+              </div>
+            </>
+          )}
+      </main>
+    </>
+  );
+}
+
+===== app\moderator\page.tsx =====
+
+"use client";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { toast } from "sonner";
+import SiteNav from "@/components/SiteNav";
+import OtpLogin from "@/components/OtpLogin";
+import { useSession } from "@/components/useSession";
+import { supabase } from "@/lib/supabase";
+
+type Row = { id: string; full_name: string; email: string; phone: string | null; city: string | null; college: string | null; year_of_study: string | null; branch: string | null; builder_id: string; consent: boolean | null; status: string; submitted_at: string };
+
+export default function ModeratorPage() {
+  const { session, loading } = useSession();
+  const [allowed, setAllowed] = useState<boolean | null>(null);
+  const [rows, setRows] = useState<Row[]>([]);
+  const [filter, setFilter] = useState("all");
+  const [q, setQ] = useState("");
+
+  const load = useCallback(async () => {
+    const { data, error } = await supabase.from("applications").select("*").order("submitted_at", { ascending: false });
+    if (error) return toast.error(error.message);
+    setRows(data as Row[]);
+  }, []);
+
+  useEffect(() => {
+    if (!session) return;
+    supabase.rpc("is_moderator").then(({ data }) => { setAllowed(!!data); if (data) load(); });
+  }, [session, load]);
+
+  async function decide(id: string, decision: "accepted" | "rejected") {
+    const { error } = await supabase.rpc("review_application", { app_id: id, new_status: decision, note: null });
+    if (error) return toast.error(error.message);
+    toast.success(`Marked ${decision}`);
+    load();
+  }
+
+  const shown = useMemo(() => rows.filter((r) =>
+    (filter === "all" || r.status === filter) &&
+    (!q || `${r.full_name} ${r.email} ${r.phone ?? ""} ${r.city ?? ""} ${r.college ?? ""} ${r.builder_id}`.toLowerCase().includes(q.toLowerCase()))), [rows, filter, q]);
+
+  function exportCsv() {
+    const esc = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+    const head = ["Name", "Email", "Phone", "City", "College", "Year", "Branch", "Builder ID", "Consent", "Status", "Submitted"];
+    const lines = shown.map((r) => [r.full_name, r.email, r.phone, r.city, r.college, r.year_of_study, r.branch, r.builder_id, r.consent ? "Yes" : "No", r.status, r.submitted_at].map(esc).join(","));
+    const blob = new Blob([[head.join(","), ...lines].join("\n")], { type: "text/csv" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob); a.download = "applications.csv"; a.click();
+  }
+
+  const count = (s: string) => rows.filter((r) => r.status === s).length;
+
+  return (
+    <>
+      <SiteNav solid />
+      <main className="mx-auto max-w-6xl px-5 py-10">
+        {allowed ? <h1 className="text-2xl font-bold">Moderator dashboard</h1> : <span />}
+        {loading ? <p className="mt-6 text-slate-400">Loading...</p>
+          : !session ? <div className="mt-6 max-w-sm rounded-2xl border border-line bg-panel p-6"><OtpLogin title="Sign in" onDone={() => {}} /></div>
+          : allowed === null ? <p className="mt-6 text-slate-400">Checking access...</p>
+          : !allowed ? <p className="mt-6 text-slate-400">404 â€“ This page could not be found.</p>
+          : (
+            <>
+              <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                {[["Total", rows.length], ["Pending", count("pending")], ["Accepted", count("accepted")], ["Rejected", count("rejected")]].map(([k, v]) => (
+                  <div key={k as string} className="rounded-xl border border-line bg-panel p-4"><p className="text-xs text-slate-400">{k}</p><p className="text-2xl font-bold">{v}</p></div>
+                ))}
+              </div>
+              <div className="mt-6 flex flex-wrap gap-3">
+                <select className="rounded-lg border border-line bg-ink px-3 py-2 text-sm" value={filter} onChange={(e) => setFilter(e.target.value)}>
+                  <option value="all">All</option><option value="pending">Pending</option><option value="accepted">Accepted</option><option value="rejected">Rejected</option>
+                </select>
+                <input className="min-w-56 flex-1 rounded-lg border border-line bg-ink px-3 py-2 text-sm" placeholder="Search name, email, phone, city, college, Builder ID" value={q} onChange={(e) => setQ(e.target.value)} />
+                <button onClick={exportCsv} className="rounded-lg border border-line px-4 py-2 text-sm hover:bg-white/5">Export CSV</button>
+              </div>
+              <div className="mt-4 overflow-x-auto rounded-xl border border-line">
+                <table className="w-full text-left text-sm">
+                  <thead className="bg-panel text-xs uppercase text-slate-400"><tr>
+                    {["Name", "Email", "Phone", "City", "College", "Year", "Branch", "Builder ID", "Status", "Actions"].map((h) => <th key={h} className="px-4 py-3">{h}</th>)}
+                  </tr></thead>
+                  <tbody className="divide-y divide-line">
+                    {shown.map((r) => (
+                      <tr key={r.id}>
+                        <td className="px-4 py-3">{r.full_name}</td><td className="px-4 py-3">{r.email}</td>
+                        <td className="px-4 py-3">{r.phone}</td><td className="px-4 py-3">{r.city}</td>
+                        <td className="px-4 py-3">{r.college}</td><td className="px-4 py-3">{r.year_of_study}</td>
+                        <td className="px-4 py-3">{r.branch}</td><td className="px-4 py-3">{r.builder_id}</td>
+                        <td className="px-4 py-3 capitalize">{r.status}</td>
+                        <td className="space-x-2 px-4 py-3 whitespace-nowrap">
+                          <button onClick={() => decide(r.id, "accepted")} className="rounded bg-green-600 px-3 py-1 text-xs font-semibold">Accept</button>
+                          <button onClick={() => decide(r.id, "rejected")} className="rounded bg-red-600 px-3 py-1 text-xs font-semibold">Reject</button>
+                        </td>
+                      </tr>
+                    ))}
+                    {shown.length === 0 && <tr><td colSpan={10} className="px-4 py-8 text-center text-slate-400">No applications.</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+      </main>
+    </>
+  );
+}
+
+===== app\register\page.tsx =====
+
+"use client";
+import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import { toast } from "sonner";
+import SiteNav from "@/components/SiteNav";
+import SiteFooter from "@/components/SiteFooter";
+import OtpLogin from "@/components/OtpLogin";
+import { useSession } from "@/components/useSession";
+import { supabase } from "@/lib/supabase";
+import { EVENT, STEPS } from "@/lib/config";
+
+const input = "w-full rounded-lg border border-line bg-ink px-4 py-3 text-sm outline-none focus:border-accent";
+
+export default function RegisterPage() {
+  const router = useRouter();
+  const { session, loading } = useSession();
+  const [open, setOpen] = useState(true);
+  const [form, setForm] = useState({
+    full_name: "", phone: "", city: "", college: "",
+    year_of_study: "", branch: "", builder_id: "", consent: false,
+  });
+  const [busy, setBusy] = useState(false);
+
+  // If already applied, go straight to the status page. Also check if applications are open.
+  useEffect(() => {
+    if (!session) return;
+    supabase.from("applications").select("id").eq("user_id", session.user.id).maybeSingle().then(({ data }) => {
+      if (data) router.replace("/status");
+    });
+  }, [session, router]);
+  useEffect(() => {
+    supabase.rpc("applications_open").then(({ data }) => { if (data === false) setOpen(false); });
+  }, []);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!session) return;
+    const phone = form.phone.replace(/\D/g, "").slice(-10);
+    if (phone.length !== 10) return toast.error("Enter a valid 10-digit phone number.");
+    if (!form.consent) return toast.error("Please accept the consent checkbox.");
+    setBusy(true);
+    const { error } = await supabase.from("applications").insert({
+      user_id: session.user.id,
+      email: session.user.email,
+      full_name: form.full_name.trim(),
+      phone,
+      city: form.city.trim(),
+      college: form.college.trim() || null,
+      year_of_study: form.year_of_study,
+      branch: form.branch.trim(),
+      builder_id: form.builder_id.trim(),
+      consent: form.consent,
+    });
+    setBusy(false);
+    if (error) return toast.error(error.code === "23505" ? "You have already applied." : error.message);
+    toast.success("Registration submitted!");
+    router.push("/status");
+  }
+
+  return (
+    <>
+      <SiteNav solid />
+      <main className="mx-auto grid max-w-6xl gap-10 px-5 py-12 lg:grid-cols-5">
+        {/* LEFT: event info */}
+        <aside className="space-y-8 lg:col-span-2">
+          <div>
+            <p className="text-xs uppercase tracking-widest text-accent">Registration</p>
+            <h1 className="mt-2 text-3xl font-bold">{EVENT.name}</h1>
+            <p className="mt-2 text-slate-400">{EVENT.tagline}</p>
+          </div>
+          <dl className="space-y-3 rounded-xl border border-line bg-panel p-5 text-sm">
+            <div><dt className="text-slate-400">Date</dt><dd className="font-semibold">{EVENT.dateLabel} Â· {EVENT.timeLabel}</dd></div>
+            <div><dt className="text-slate-400">Venue</dt><dd className="font-semibold">{EVENT.venue}, {EVENT.city}</dd></div>
+            <div><dt className="text-slate-400">Entry</dt><dd className="font-semibold">Free Â· limited seats</dd></div>
+          </dl>
+          <ol className="space-y-3 text-sm">
+            {STEPS.map((s) => (
+              <li key={s.n} className="flex gap-3">
+                <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-accent text-xs font-bold text-white">{s.n}</span>
+                <span><b>{s.title}.</b> <span className="text-slate-400">{s.body}</span></span>
+              </li>
+            ))}
+          </ol>
+        </aside>
+
+        {/* RIGHT: OTP then form */}
+        <section className="lg:col-span-3">
+          <div className="rounded-2xl border border-line bg-panel p-6 sm:p-8">
+            {!open ? (
+              <p className="text-slate-300">Registration is currently closed. Please check back later.</p>
+            ) : loading ? (
+              <p className="text-slate-400">Loading...</p>
+            ) : !session ? (
+              <OtpLogin title="Step 1: Verify your email" onDone={() => toast.success("Email verified")} />
+            ) : (
+              <form onSubmit={submit} className="space-y-4">
+                <h2 className="text-lg font-semibold">Step 2: Your details</h2>
+                <div>
+                  <label className="mb-1 block text-sm text-slate-400">Email (verified)</label>
+                  <input className={`${input} opacity-60`} value={session.user.email ?? ""} readOnly />
+                </div>
+                <div>
+                  <label className="mb-1 block text-sm text-slate-400">Full name</label>
+                  <input className={input} required value={form.full_name} onChange={(e) => setForm({ ...form, full_name: e.target.value })} />
+                </div>
+                <div>
+                  <label className="mb-1 block text-sm text-slate-400">Phone / WhatsApp number</label>
+                  <input className={input} required type="tel" inputMode="numeric" placeholder="10-digit number" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} />
+                </div>
+                <div>
+                  <label className="mb-1 block text-sm text-slate-400">City</label>
+                  <input className={input} required value={form.city} onChange={(e) => setForm({ ...form, city: e.target.value })} />
+                </div>
+                <div>
+                  <label className="mb-1 block text-sm text-slate-400">College / organisation</label>
+                  <input className={input} required value={form.college} onChange={(e) => setForm({ ...form, college: e.target.value })} />
+                </div>
+                <div>
+                  <label className="mb-1 block text-sm text-slate-400">Year of study</label>
+                  <select className={input} required value={form.year_of_study} onChange={(e) => setForm({ ...form, year_of_study: e.target.value })}>
+                    <option value="">Select</option>
+                    <option>1st year</option><option>2nd year</option><option>3rd year</option><option>4th year</option><option>Working professional</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="mb-1 block text-sm text-slate-400">Branch / department</label>
+                  <input className={input} required value={form.branch} onChange={(e) => setForm({ ...form, branch: e.target.value })} />
+                </div>
+                <div>
+                  <label className="mb-1 block text-sm text-slate-400">AWS Builder ID</label>
+                  <input className={input} required value={form.builder_id} onChange={(e) => setForm({ ...form, builder_id: e.target.value })} placeholder="Your AWS Builder ID" />
+                  <p className="mt-1 text-xs text-slate-400">
+                    Don't have one?{" "}
+                    <a className="underline text-accent" href={EVENT.builderIdSignupUrl} target="_blank" rel="noreferrer">Create it here (about 2 minutes)</a>, then come back.
+                  </p>
+                </div>
+                <label className="flex items-start gap-3 text-sm text-slate-300">
+                  <input type="checkbox" className="mt-1" checked={form.consent} onChange={(e) => setForm({ ...form, consent: e.target.checked })} />
+                  I agree to share my details with the organisers.
+                </label>
+                <button disabled={busy} className="w-full rounded-lg bg-accent px-4 py-3 text-sm font-semibold text-white hover:brightness-110 disabled:opacity-50">
+                  {busy ? "Submitting..." : "Complete registration"}
+                </button>
+                <p className="text-xs text-slate-500">Your details are used only for this event. Questions? {EVENT.contactEmail}</p>
+              </form>
+            )}
+          </div>
+        </section>
+      </main>
+      <SiteFooter />
+    </>
+  );
+}
+
+===== app\status\page.tsx =====
+
+"use client";
+import { useEffect, useState } from "react";
+import Link from "next/link";
+import SiteNav from "@/components/SiteNav";
+import SiteFooter from "@/components/SiteFooter";
+import OtpLogin from "@/components/OtpLogin";
+import { useSession } from "@/components/useSession";
+import { supabase } from "@/lib/supabase";
+
+type App = { full_name: string; builder_id: string; status: "pending" | "accepted" | "rejected"; submitted_at: string };
+
+export default function StatusPage() {
+  const { session, loading } = useSession();
+  const [app, setApp] = useState<App | null | undefined>(undefined);
+  const [wa, setWa] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!session) return;
+    supabase.from("applications").select("full_name,builder_id,status,submitted_at").eq("user_id", session.user.id).maybeSingle()
+      .then(({ data }) => setApp((data as App) ?? null));
+    // Returns the link only when this user's application is accepted.
+    supabase.rpc("get_whatsapp_link").then(({ data }) => setWa((data as string) || null));
+  }, [session]);
+
+  const label = { pending: "Awaiting confirmation", accepted: "Confirmed", rejected: "Not selected" };
+  const badge = { pending: "bg-yellow-500/20 text-yellow-300", accepted: "bg-green-500/20 text-green-300", rejected: "bg-red-500/20 text-red-300" };
+
+  return (
+    <>
+      <SiteNav solid />
+      <main className="mx-auto max-w-xl px-5 py-12">
+        <div className="rounded-2xl border border-line bg-panel p-6 sm:p-8">
+          <h1 className="mb-4 text-2xl font-bold">My registration</h1>
+          {loading ? <p className="text-slate-400">Loading...</p>
+            : !session ? <OtpLogin title="Sign in to see your status" onDone={() => {}} />
+            : app === undefined ? <p className="text-slate-400">Loading...</p>
+            : app === null ? (
+              <p className="text-slate-300">No registration yet. <Link href="/register" className="underline text-accent">Register now</Link></p>
+            ) : (
+              <div className="space-y-4">
+                <p><span className="text-slate-400">Name: </span>{app.full_name}</p>
+                <p><span className="text-slate-400">Builder ID: </span>{app.builder_id}</p>
+                <p><span className="text-slate-400">Status: </span><span className={`rounded-full px-3 py-1 text-sm font-semibold ${badge[app.status]}`}>{label[app.status]}</span></p>
+                {app.status === "pending" && <p className="text-sm text-slate-400">We'll update your status here soon. Check back later.</p>}
+                {app.status === "rejected" && <p className="text-sm text-slate-400">Sorry, we couldn't offer you a seat this time.</p>}
+                {app.status === "accepted" && (
+                  <div className="rounded-xl border border-green-500/40 bg-green-500/10 p-4">
+                    <p className="font-semibold">You're in! ðŸŽ‰</p>
+                    {wa ? <a href={wa} target="_blank" rel="noreferrer" className="mt-2 inline-block rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-white">Join the WhatsApp group</a>
+                        : <p className="mt-1 text-sm text-slate-300">Your seat is confirmed. See you there!</p>}
+                  </div>
+                )}
+                <button className="text-xs text-slate-400 underline" onClick={() => supabase.auth.signOut()}>Sign out</button>
+              </div>
+            )}
+        </div>
+      </main>
+      <SiteFooter />
+    </>
+  );
+}
+
+
+===== app\globals.css =====
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html { scroll-behavior: smooth; }
+body { background: #02040c; color: #e6ebf5; }
+input, select, textarea { color-scheme: dark; }
+
+
+===== app\layout.tsx =====
+
+import type { Metadata } from "next";
+import "./globals.css";
+import { Toaster } from "sonner";
+import { EVENT } from "@/lib/config";
+
+export const metadata: Metadata = {
+  title: EVENT.name,
+  description: EVENT.tagline,
+};
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="en">
+      <head>
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
+        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600;700;800&display=swap" rel="stylesheet" />
+      </head>
+      <body className="font-sans antialiased">
+        {children}
+        <Toaster position="top-center" theme="dark" richColors />
+      </body>
+    </html>
+  );
+}
+
+
+===== app\page.tsx =====
+
+import Link from "next/link";
+import SiteNav from "@/components/SiteNav";
+import SiteFooter from "@/components/SiteFooter";
+import Logo from "@/components/Logo";
+import Photo from "@/components/Photo";
+import Reveal from "@/components/Reveal";
+import CountUp from "@/components/CountUp";
+import Countdown from "@/components/Countdown";
+import HeroVideo from "@/components/HeroVideo";
+import BackToTop from "@/components/BackToTop";
+import { DayTabs, FooterAccordion, InterestPicker, TestimonialCarousel } from "@/components/Interactive";
+import { AGENDA, CATALOG_URL, EVENT, FAQS, IMG } from "@/lib/config";
+
+const grad = "bg-gradient-to-r from-indigo-600 to-fuchsia-600 bg-clip-text text-transparent";
+
+export default function Home() {
+  const collage = [
+    ["col-span-2 row-span-2", IMG.collage1], ["col-span-2 row-span-1", IMG.collage2], ["col-span-2 row-span-1", IMG.collage3],
+    ["col-span-2 row-span-1", IMG.collage4], ["col-span-2 row-span-1", IMG.collage5], ["col-span-2 row-span-1", IMG.collage6],
+  ];
+  return (
+    <main className="bg-ink">
+      <SiteNav />
+
+      {/* HERO */}
+      <section className="relative min-h-screen overflow-hidden">
+        <HeroVideo />
+        <div className="absolute inset-0 bg-gradient-to-r from-ink/90 via-ink/60 to-ink/30" />
+        <div className="absolute inset-x-0 bottom-0 h-40 bg-gradient-to-t from-ink to-transparent" />
+        <div className="relative mx-auto grid max-w-7xl items-center gap-10 px-5 pb-24 pt-32 lg:grid-cols-12">
+          <div className="lg:col-span-6">
+            <p className="mb-6 text-xs text-slate-300">AWS &nbsp;â€º&nbsp; Events &nbsp;â€º&nbsp; re:Invent</p>
+            <div className="rounded-3xl border border-white/10 bg-black/45 p-8 backdrop-blur-md sm:p-10">
+              <Logo size="lg" />
+              <h1 className="mt-6 text-3xl font-semibold sm:text-4xl">Build what's next</h1>
+              <p className="mt-4 max-w-md text-lg text-slate-200">Join us in Mysore this December for cloud and AI's biggest week.</p>
+              <div className="mt-8 flex flex-wrap gap-3">
+                <Link href="/register" className="rounded-full bg-white/15 px-7 py-3 text-sm font-semibold transition hover:bg-white/25">Register now</Link>
+                <a href={CATALOG_URL} target="_blank" rel="noreferrer" className="rounded-full border border-white/60 px-7 py-3 text-sm font-semibold transition hover:bg-white/10">Browse event catalog</a>
+              </div>
+            </div>
+            <Countdown iso={EVENT.startISO} />
+          </div>
+          <div className="hidden auto-rows-[110px] grid-cols-6 gap-3 lg:col-span-6 lg:grid">
+            {collage.map(([span, src], i) => (
+              <div key={i} className={`${span} overflow-hidden rounded-xl ring-1 ring-white/10`}>
+                <Photo src={src} alt="" hideOnError className="h-full w-full transition duration-700 hover:scale-105" />
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* THE LATEST */}
+      <section id="plan" className="mx-auto max-w-6xl px-5 py-24">
+        <Reveal><h2 className="text-3xl font-semibold sm:text-4xl">The latest on re:Invent</h2></Reveal>
+        <div className="mt-10 grid gap-6 md:grid-cols-2">
+          {[
+            ["Registration", IMG.card1, "Save your seat", "Registration is open. Reserve your spot and get ready to join us.", "/register"],
+            ["Community", IMG.card2, "Meet the community", "Connect with students, developers and cloud enthusiasts, and stay in touch long after the event.", "/#about"],
+            ["Agenda", IMG.card3, "Browse the agenda", "See how the day will run, from the keynote screening to hands-on building, and show up with your day already planned.", "/#agenda"],
+          ].map(([tag, img, title, body, href], i) => (
+            <Reveal key={title} delay={i * 100}>
+              <Link href={href} className="group block h-full overflow-hidden rounded-2xl bg-panel ring-1 ring-white/5 transition duration-300 hover:-translate-y-1 hover:ring-fuchsia-500/40">
+                <div className="relative overflow-hidden">
+                  <Photo src={img} alt={title} className="h-60 w-full transition duration-700 group-hover:scale-105" />
+                  <span className="absolute left-4 top-4 rounded bg-black/70 px-2 py-1 font-mono text-[11px]">{tag}</span>
+                </div>
+                <div className="p-6">
+                  <h3 className="text-xl font-semibold">{title}</h3>
+                  <p className="mt-2 text-sm text-slate-300">{body}</p>
+                  <span className="mt-6 block text-xl transition group-hover:translate-x-1">â†’</span>
+                </div>
+              </Link>
+            </Reveal>
+          ))}
+        </div>
+      </section>
+
+      {/* WHY THIS WEEK MATTERS */}
+      <section id="about" className="mx-auto grid max-w-6xl gap-10 px-5 pb-24 lg:grid-cols-2">
+        <Reveal>
+          <div className="relative overflow-hidden rounded-2xl">
+            <Photo src={IMG.video} alt="re:Invent highlights" className="h-72 w-full" />
+            <span className="absolute bottom-4 left-4 flex h-11 w-11 items-center justify-center rounded-full bg-black/70">â–¶</span>
+          </div>
+        </Reveal>
+        <Reveal delay={120}>
+          <h2 className="text-3xl font-semibold sm:text-4xl">Why this week matters right now</h2>
+          <div className="mt-6 space-y-4 text-sm leading-relaxed text-slate-200">
+            <p>New services are launching. Architectures are shifting. The decisions you make next matter.</p>
+            <p>From startups to enterprises, AWS re:Invent is where the cloud and AI community comes together to work through what's next. Over 2,200 sessions, 70% of them interactive. Experts who share what worked and what didn't.</p>
+            <p>Be part of it with a local community of builders, watching and learning together.</p>
+          </div>
+        </Reveal>
+      </section>
+
+      {/* SESSIONS AND TOPICS */}
+      <section className="mx-auto grid max-w-6xl gap-10 px-5 pb-28 lg:grid-cols-2">
+        <Reveal><h2 className="text-3xl font-semibold sm:text-4xl">Get a look at this year's sessions and topics</h2></Reveal>
+        <Reveal delay={120}>
+          <p className="text-sm leading-relaxed text-slate-200">Over 1,200 sessions are now live across AI, security, migration, developer productivity, and more. Start favoriting the ones you don't want to miss. New sessions are added continuously.</p>
+          <p className="mt-6"><a className="text-sky-400 underline underline-offset-4" href={CATALOG_URL} target="_blank" rel="noreferrer">Browse event catalog</a></p>
+        </Reveal>
+      </section>
+
+      {/* BY THE NUMBERS */}
+      <section className="mx-auto max-w-6xl px-5 pb-28">
+        <Reveal><h2 className="text-3xl font-semibold sm:text-4xl">re:Invent by the numbers</h2></Reveal>
+        <div className="mt-12 grid items-center gap-12 lg:grid-cols-2">
+          <Reveal>
+            <p className={`${grad} text-8xl font-bold sm:text-9xl`}><CountUp to={94} suffix="%" /></p>
+            <p className="mt-4 text-2xl font-medium">of attendees recommend re:Invent to a colleague</p>
+          </Reveal>
+          <Reveal delay={120} className="space-y-8">
+            <div className="border-b border-white/15 pb-8">
+              <p className={`${grad} text-5xl font-bold`}>1,000s</p>
+              <p className="mt-2 text-2xl font-medium">of opportunities to connect with AWS experts in small groups</p>
+            </div>
+            <div>
+              <p className={`${grad} text-5xl font-bold`}><CountUp to={70} suffix="%" /></p>
+              <p className="mt-2 text-2xl font-medium">of sessions are interactive</p>
+            </div>
+          </Reveal>
+        </div>
+      </section>
+
+      {/* TESTIMONIAL */}
+      <section className="mx-auto max-w-6xl px-5 pb-28"><Reveal><TestimonialCarousel /></Reveal></section>
+
+      {/* A DAY AT RE:INVENT */}
+      <section className="mx-auto max-w-6xl px-5 pb-28">
+        <Reveal>
+          <h2 className="text-3xl font-semibold sm:text-4xl">A day at re:Invent</h2>
+          <p className="mb-8 mt-3 max-w-2xl text-lg text-slate-200">Five days, 2,200+ sessions, and countless opportunities to build your network. Here's what a single day looks like.</p>
+          <DayTabs />
+        </Reveal>
+      </section>
+
+      {/* MYSORE AGENDA */}
+      <section id="agenda" className="mx-auto max-w-4xl px-5 pb-28">
+        <Reveal>
+          <h2 className="text-3xl font-semibold sm:text-4xl">Your day in Mysore</h2>
+          <p className="mt-3 text-slate-300">{EVENT.dateLabel} Â· {EVENT.venue}. Timings are tentative and may be updated.</p>
+        </Reveal>
+        <ol className="relative mt-10 space-y-6 border-l border-white/15 pl-8">
+          {AGENDA.map((a, i) => (
+            <Reveal key={a.title} delay={i * 60}>
+              <li className="relative">
+                <span className="absolute -left-[41px] top-1.5 h-4 w-4 rounded-full bg-gradient-to-br from-indigo-500 to-fuchsia-500 ring-4 ring-ink" />
+                <p className="text-sm font-semibold text-fuchsia-400">{a.time}</p>
+                <h3 className="mt-1 text-lg font-semibold">{a.title}</h3>
+                <p className="text-sm text-slate-400">{a.detail}</p>
+              </li>
+            </Reveal>
+          ))}
+        </ol>
+      </section>
+
+      {/* WHAT YOU BRING BACK */}
+      <section className="mx-auto max-w-6xl px-5 pb-28">
+        <Reveal>
+          <h2 className="text-3xl font-semibold sm:text-4xl">What you bring back</h2>
+          <p className="mt-3 text-lg text-slate-200">Your experience is designed for you. Here's what you leave with.</p>
+        </Reveal>
+        <div className="mt-10 grid gap-8 sm:grid-cols-2 lg:grid-cols-3">
+          {[
+            [IMG.bring1, "New skills you've already used to build something or applied in a working session"],
+            [IMG.bring2, "Tested approaches and vetted best practices ready to put to work the week you return"],
+            [IMG.bring3, "Relationships with AWS experts and cross-industry peers you can call when you're stuck"],
+            [IMG.bring4, "A clear view of what's changing across cloud and AI and what it means for your next move"],
+          ].map(([img, text], i) => (
+            <Reveal key={i} delay={i * 80}>
+              <div className="group overflow-hidden rounded-xl"><Photo src={img} alt="" className="h-48 w-full transition duration-700 group-hover:scale-105" /></div>
+              <p className={`${grad} mt-4 text-2xl font-semibold`}>{i + 1}.</p>
+              <p className="mt-2 text-sm text-slate-200">{text}</p>
+            </Reveal>
+          ))}
+        </div>
+      </section>
+
+      {/* INTERESTED IN */}
+      <section className="mx-auto max-w-6xl px-5 pb-28"><Reveal><InterestPicker /></Reveal></section>
+
+      {/* BUILDER CENTER IN ACTION */}
+      <section id="pass" className="mx-auto max-w-6xl px-5 pb-28">
+        <Reveal>
+          <div className="relative overflow-hidden rounded-3xl border border-white/10 bg-gradient-to-br from-[#0b1020] to-[#120a24] p-8 sm:p-12">
+            <div className="pointer-events-none absolute -right-10 bottom-0 hidden grid-cols-6 gap-1 opacity-90 md:grid">
+              {Array.from({ length: 18 }).map((_, i) => (
+                <span key={i} className={`h-14 w-14 ${[0, 1, 2, 6, 7, 8, 10, 15].includes(i) ? "bg-gradient-to-br from-indigo-600 via-blue-600 to-teal-500" : [4, 9, 16].includes(i) ? "bg-gradient-to-br from-teal-500 to-indigo-500" : "bg-white/[0.03]"}`} />
+              ))}
+            </div>
+            <div className="relative max-w-2xl">
+              <p className="text-xs font-semibold uppercase tracking-widest text-fuchsia-400">Free for builders</p>
+              <h2 className="mt-3 text-3xl font-semibold sm:text-4xl">Builder Center in action.</h2>
+              <p className="mt-3 text-slate-300">Watch re:Invent live, learn, build and connect with the Mysore builder community.</p>
+              <Link href="/register" className="mt-6 inline-block rounded-xl bg-[#3a0f8f] px-7 py-3.5 text-sm font-semibold transition hover:bg-[#4b1bb0]">Register for Free</Link>
+              <div className="mt-8 grid max-w-xl grid-cols-2 gap-3">
+                {[["Free Entry", "For eligible students"], ["Limited Seats", "Register early"], ["Pre-registration", "No on-site registration"], ["1 City", "Mysore"]].map(([t, s]) => (
+                  <div key={t} className="flex items-center gap-3 rounded-xl border border-white/10 bg-black/30 p-4 transition hover:border-fuchsia-500/40">
+                    <span className="h-9 w-9 shrink-0 rounded-lg bg-gradient-to-br from-indigo-500 to-fuchsia-500" />
+                    <div><p className="text-sm font-semibold">{t}</p><p className="text-xs text-slate-400">{s}</p></div>
+                  </div>
+                ))}
+              </div>
+              <pre className="mt-6 max-w-xl overflow-x-auto rounded-xl border border-white/10 bg-black/40 p-5 text-sm leading-relaxed"><span className="text-fuchsia-400">if</span> ready_to_build:{"\n"}    learn(); build(); connect(){"\n\n"}<span className="text-fuchsia-400">else</span>:{"\n"}    print("see you there anyway")</pre>
+            </div>
+          </div>
+        </Reveal>
+      </section>
+
+      {/* FAQ */}
+      <section id="faq" className="mx-auto max-w-3xl px-5 pb-28">
+        <Reveal><h2 className="text-3xl font-semibold sm:text-4xl">FAQ</h2></Reveal>
+        <div className="mt-8 space-y-3">
+          {FAQS.map((f) => (
+            <details key={f.q} className="group rounded-xl bg-panel p-5 ring-1 ring-white/5 transition open:ring-fuchsia-500/30">
+              <summary className="flex cursor-pointer list-none items-center justify-between font-semibold">{f.q}<span className="text-xl transition group-open:rotate-45">+</span></summary>
+              <p className="mt-3 text-sm text-slate-300">{f.a}</p>
+            </details>
+          ))}
+        </div>
+      </section>
+
+      {/* CLOSING */}
+      <section className="mx-auto grid max-w-6xl items-center gap-10 px-5 pb-24 lg:grid-cols-2">
+        <Reveal>
+          <h2 className="text-4xl font-semibold leading-tight sm:text-5xl">One city. Real access. Real answers. Join us.</h2>
+          <p className="mt-6 text-slate-200">{EVENT.dateLabel} | {EVENT.city}</p>
+        </Reveal>
+        <Reveal delay={120}><Photo src={IMG.closing} alt="Event venue" className="h-72 w-full rounded-2xl" /></Reveal>
+      </section>
+
+      <div className="mx-auto max-w-6xl px-5 pb-12">
+        <FooterAccordion items={[
+          { title: "About AWS", links: [["AWS re:Invent", EVENT.officialReinventUrl]] },
+          { title: "Resources", links: [["Create an AWS Builder ID", EVENT.builderIdSignupUrl], ["Session catalog", CATALOG_URL]] },
+          { title: "Help", links: [["Contact the organisers", `mailto:${EVENT.contactEmail}`], ["My registration status", "/status"]] },
+        ]} />
+      </div>
+      <SiteFooter />
+      <BackToTop />
+    </main>
+  );
+}
+
+
+===== components\BackToTop.tsx =====
+
+"use client";
+import { useEffect, useState } from "react";
+
+export default function BackToTop() {
+  const [show, setShow] = useState(false);
+  useEffect(() => {
+    const f = () => setShow(window.scrollY > 700);
+    f(); window.addEventListener("scroll", f, { passive: true });
+    return () => window.removeEventListener("scroll", f);
+  }, []);
+  return (
+    <button aria-label="Back to top" onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
+      className={`fixed bottom-6 left-1/2 z-40 flex h-12 w-12 -translate-x-1/2 items-center justify-center rounded-full bg-white/15 text-xl backdrop-blur transition hover:bg-white/25 ${show ? "opacity-100" : "pointer-events-none opacity-0"}`}>
+      â†‘
+    </button>
+  );
+}
+
+
+===== components\Countdown.tsx =====
+
+"use client";
+import { useEffect, useState } from "react";
+
+export default function Countdown({ iso }: { iso: string }) {
+  const [left, setLeft] = useState<number | null>(null);
+  useEffect(() => {
+    if (!iso) return;
+    const t = new Date(iso).getTime();
+    const f = () => setLeft(t - Date.now());
+    f();
+    const id = setInterval(f, 30000);
+    return () => clearInterval(id);
+  }, [iso]);
+  if (!iso || left === null || left <= 0) return null;
+  const d = Math.floor(left / 864e5), h = Math.floor((left % 864e5) / 36e5), m = Math.floor((left % 36e5) / 6e4);
+  return (
+    <div className="mt-6 flex gap-3">
+      {[["Days", d], ["Hours", h], ["Minutes", m]].map(([l, v]) => (
+        <div key={l as string} className="w-20 rounded-xl bg-white/10 py-3 text-center backdrop-blur">
+          <p className="text-2xl font-semibold">{v}</p><p className="text-[11px] uppercase tracking-wider text-slate-300">{l}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+
+===== components\CountUp.tsx =====
+
+"use client";
+import { useEffect, useRef, useState } from "react";
+
+export default function CountUp({ to, suffix = "" }: { to: number; suffix?: string }) {
+  const ref = useRef<HTMLSpanElement>(null);
+  const [n, setN] = useState(to);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    setN(0);
+    const io = new IntersectionObserver(([e]) => {
+      if (!e.isIntersecting) return;
+      io.disconnect();
+      const t0 = performance.now();
+      const tick = (t: number) => {
+        const p = Math.min((t - t0) / 1400, 1);
+        setN(Math.round(to * (1 - Math.pow(1 - p, 3))));
+        if (p < 1) requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    }, { threshold: 0.4 });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [to]);
+  return <span ref={ref}>{n}{suffix}</span>;
+}
+
+
+===== components\HeroVideo.tsx =====
+
+"use client";
+import { useRef, useState } from "react";
+import { EVENT, IMG } from "@/lib/config";
+
+export default function HeroVideo() {
+  const ref = useRef<HTMLVideoElement>(null);
+  const [playing, setPlaying] = useState(true);
+  function toggle() {
+    const v = ref.current; if (!v) return;
+    if (v.paused) { v.play(); setPlaying(true); } else { v.pause(); setPlaying(false); }
+  }
+  return (
+    <>
+      <video ref={ref} className="absolute inset-0 h-full w-full object-cover" autoPlay muted loop playsInline preload="auto" poster={IMG.hero}>
+        <source src={EVENT.heroVideo} type="video/mp4" />
+      </video>
+      <button onClick={toggle} aria-label={playing ? "Pause background video" : "Play background video"}
+        className="absolute bottom-6 right-6 z-10 flex h-11 w-11 items-center justify-center rounded-full bg-black/50 text-sm backdrop-blur hover:bg-black/70">
+        {playing ? "âšâš" : "â–¶"}
+      </button>
+    </>
+  );
+}
+
+
+===== components\Interactive.tsx =====
+
+"use client";
+import { useState } from "react";
+import Photo from "./Photo";
+import { BUILD_ITEMS, IMG, LEAD_ITEMS, TESTIMONIALS } from "@/lib/config";
+
+export function TestimonialCarousel() {
+  const [i, setI] = useState(0);
+  const n = TESTIMONIALS.length;
+  const t = TESTIMONIALS[i];
+  return (
+    <div>
+      <blockquote className="max-w-4xl text-2xl font-medium leading-snug sm:text-3xl">â€œ{t.quote}â€</blockquote>
+      <p className="mt-6 text-sm">{t.author}</p>
+      <div className="mt-8 inline-flex items-center gap-4 rounded-full bg-white/10 px-4 py-3 text-sm">
+        <button aria-label="Previous" onClick={() => setI((i - 1 + n) % n)}>â€¹</button>
+        <span className="font-semibold">{i + 1} / {n}</span>
+        <button aria-label="Next" onClick={() => setI((i + 1) % n)}>â€º</button>
+      </div>
+    </div>
+  );
+}
+
+export function DayTabs() {
+  const [tab, setTab] = useState<"build" | "lead">("build");
+  const items = tab === "build" ? BUILD_ITEMS : LEAD_ITEMS;
+  return (
+    <div>
+      <div className="inline-flex rounded-full border border-white/20 p-1 text-sm font-medium">
+        {([["build", "For those who build and implement"], ["lead", "For those who lead and strategize"]] as const).map(([k, label]) => (
+          <button key={k} onClick={() => setTab(k)}
+            className={`rounded-full px-5 py-3 ${tab === k ? "bg-gradient-to-r from-indigo-950 to-fuchsia-900" : "text-slate-300"}`}>{label}</button>
+        ))}
+      </div>
+      <div className="mt-8 grid gap-10 lg:grid-cols-2">
+        <div>
+          <h3 className="text-3xl font-semibold">{tab === "build" ? "For those who build and implement" : "For those who lead and strategize"}</h3>
+          <p className="mt-6 text-sm leading-relaxed text-slate-200">
+            {tab === "build"
+              ? "Your day moves fast. A new service launches, and you're immediately hands-on with it. You join a debate and solve the architecture problem you've been wrestling with for weeks. You sit down with the engineers who built the services you rely on and walk away with the answers you need to move forward."
+              : "Your day is about direction. You hear where cloud and AI are heading, learn how others made the hard calls, and compare notes with peers facing the same decisions."}
+          </p>
+          <div className="mt-6 space-y-5 text-sm">
+            {items.map(([h, b]) => (
+              <div key={h}><p className="font-semibold uppercase">{h}</p><p className="text-slate-300">{b}</p></div>
+            ))}
+          </div>
+        </div>
+        <Photo src={tab === "build" ? IMG.dayBuild : IMG.dayLead} alt="Attendees at a session" className="h-72 w-full rounded-xl lg:h-80" />
+      </div>
+    </div>
+  );
+}
+
+const INTERESTS = {
+  "Getting hands-on": [
+    ["Deploy, test, and build", "Workshops and builders' sessions where you can work alongside experts in live environments.", IMG.interest1],
+    ["Ask the experts", "Small group conversations designed to get you answers. Find chalk talks and code talks where the people who build the services answer your questions.", IMG.interest2],
+  ],
+  "Learning the latest": [
+    ["Keynote highlights", "Catch the biggest announcements together, as they happen.", IMG.interest1],
+    ["Cloud and AI topics", "Generative AI, machine learning, serverless, security and developer productivity.", IMG.interest2],
+  ],
+  "Meeting people": [
+    ["Builder community", "Meet students, developers and cloud practitioners from across Mysore.", IMG.interest1],
+    ["Stay connected", "Keep in touch with fellow attendees long after the event.", IMG.interest2],
+  ],
+} as const;
+
+export function InterestPicker() {
+  const keys = Object.keys(INTERESTS) as (keyof typeof INTERESTS)[];
+  const [k, setK] = useState<keyof typeof INTERESTS>(keys[0]);
+  return (
+    <div>
+      <h2 className="text-3xl font-semibold">
+        I'm interested in{" "}
+        <select value={k} onChange={(e) => setK(e.target.value as keyof typeof INTERESTS)}
+          className="cursor-pointer rounded bg-transparent text-fuchsia-400 underline decoration-fuchsia-500 underline-offset-8 outline-none">
+          {keys.map((x) => <option key={x} value={x} className="bg-ink text-white">{x}</option>)}
+        </select>
+      </h2>
+      <div className="mt-8 grid gap-5 md:grid-cols-2">
+        {INTERESTS[k].map(([title, body, img]) => (
+          <div key={title} className="flex overflow-hidden rounded-2xl bg-panel">
+            <Photo src={img} alt={title} className="w-2/5 shrink-0" />
+            <div className="p-5">
+              <h3 className="text-lg font-semibold">{title}</h3>
+              <p className="mt-2 text-sm text-slate-300">{body}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+export function FooterAccordion({ items }: { items: { title: string; links: [string, string][] }[] }) {
+  const [open, setOpen] = useState<string | null>(null);
+  return (
+    <div className="border-t border-white/20">
+      {items.map((s) => (
+        <div key={s.title} className="border-b border-white/20">
+          <button className="flex w-full items-center justify-between py-5 text-left font-semibold" onClick={() => setOpen(open === s.title ? null : s.title)}>
+            {s.title}<span className="text-xl">{open === s.title ? "âˆ’" : "+"}</span>
+          </button>
+          {open === s.title && (
+            <ul className="space-y-2 pb-5 text-sm text-slate-300">
+              {s.links.map(([l, h]) => <li key={l}><a className="hover:underline" href={h}>{l}</a></li>)}
+            </ul>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+
+===== components\Logo.tsx =====
+
+// "AWS" small, "re:Invent" large, stacked like the official wordmark.
+export default function Logo({ size = "md" }: { size?: "md" | "lg" }) {
+  const big = size === "lg";
+  return (
+    <span className="inline-flex flex-col leading-none">
+      <span className={`${big ? "text-2xl" : "text-sm"} font-medium tracking-wide`}>AWS</span>
+      <span className={`${big ? "text-7xl sm:text-8xl" : "text-4xl"} font-extralight tracking-tight`}>re:Invent</span>
+    </span>
+  );
+}
+
+
+===== components\OtpLogin.tsx =====
+
+"use client";
+import { useState } from "react";
+import { toast } from "sonner";
+import { supabase } from "@/lib/supabase";
+
+const input = "w-full rounded-lg border border-line bg-ink px-4 py-3 text-sm outline-none focus:border-accent";
+const btn = "w-full rounded-lg bg-accent px-4 py-3 text-sm font-semibold text-white hover:brightness-110 disabled:opacity-50";
+
+export default function OtpLogin({ onDone, title = "Verify your email" }: { onDone: () => void; title?: string }) {
+  const [email, setEmail] = useState("");
+  const [code, setCode] = useState("");
+  const [sent, setSent] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  async function send(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    const { error } = await supabase.auth.signInWithOtp({ email: email.trim().toLowerCase() });
+    setBusy(false);
+    if (error) return toast.error(error.message);
+    setSent(true);
+    toast.success("Code sent. Check your inbox (and spam).");
+  }
+
+  async function verify(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    const { error } = await supabase.auth.verifyOtp({ email: email.trim().toLowerCase(), token: code.trim(), type: "email" });
+    setBusy(false);
+    if (error) return toast.error(error.message);
+    onDone();
+  }
+
+  return (
+    <div className="space-y-4">
+      <h2 className="text-lg font-semibold">{title}</h2>
+      {!sent ? (
+        <form onSubmit={send} className="space-y-3">
+          <input className={input} type="email" required placeholder="you@example.com" value={email} onChange={(e) => setEmail(e.target.value)} />
+          <button className={btn} disabled={busy}>{busy ? "Sending..." : "Send code"}</button>
+        </form>
+      ) : (
+        <form onSubmit={verify} className="space-y-3">
+          <p className="text-sm text-slate-400">Enter the code sent to {email}</p>
+          <input className={`${input} tracking-[0.4em]`} inputMode="numeric" required placeholder="Code" value={code} onChange={(e) => setCode(e.target.value)} />
+          <button className={btn} disabled={busy}>{busy ? "Verifying..." : "Verify"}</button>
+          <button type="button" className="w-full text-xs text-slate-400 underline" onClick={() => setSent(false)}>Use a different email</button>
+        </form>
+      )}
+    </div>
+  );
+}
+
+
+===== components\Photo.tsx =====
+
+"use client";
+import { useEffect, useRef, useState } from "react";
+
+export default function Photo({ src, alt, className = "", hideOnError = false }: { src?: string; alt: string; className?: string; hideOnError?: boolean }) {
+  const [bad, setBad] = useState(false);
+  const ref = useRef<HTMLImageElement>(null);
+  // The image may already have failed before React hydrated, so check once on mount.
+  useEffect(() => {
+    const el = ref.current;
+    if (el && el.complete && el.naturalWidth === 0) setBad(true);
+  }, []);
+  if (!src || bad) {
+    if (hideOnError) return null;
+    return <div role="img" aria-label={alt} className={`bg-gradient-to-br from-indigo-950 via-purple-900 to-fuchsia-900 ${className}`} />;
+  }
+  // eslint-disable-next-line @next/next/no-img-element
+  return <img ref={ref} src={src} alt={alt} className={`object-cover ${className}`} onError={() => setBad(true)} />;
+}
+
+
+===== components\Reveal.tsx =====
+
+"use client";
+import { useEffect, useRef, useState } from "react";
+
+export default function Reveal({ children, delay = 0, className = "" }: { children: React.ReactNode; delay?: number; className?: string }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [ready, setReady] = useState(false);
+  const [on, setOn] = useState(false);
+  useEffect(() => {
+    setReady(true);
+    const el = ref.current;
+    if (!el) return;
+    const io = new IntersectionObserver(([e]) => { if (e.isIntersecting) { setOn(true); io.disconnect(); } }, { threshold: 0.1 });
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
+  return (
+    <div ref={ref} style={{ transitionDelay: `${delay}ms` }}
+      className={`${ready && !on ? "translate-y-6 opacity-0" : "translate-y-0 opacity-100"} transition duration-700 ease-out motion-reduce:transition-none ${className}`}>
+      {children}
+    </div>
+  );
+}
+
+
+===== components\SiteFooter.tsx =====
+
+import { EVENT } from "@/lib/config";
+
+export default function SiteFooter() {
+  return (
+    <footer className="bg-ink">
+      <div className="mx-auto max-w-6xl space-y-2 px-5 py-8 text-xs text-slate-400">
+        <p>{EVENT.name} Â· Organised by {EVENT.organiser} Â· <a className="underline" href={`mailto:${EVENT.contactEmail}`}>{EVENT.contactEmail}</a></p>
+        <p>Your details are used only to manage this event.</p>
+        <p>AWS and re:Invent are trademarks of Amazon.com, Inc. or its affiliates.</p>
+      </div>
+    </footer>
+  );
+}
+
+
+===== components\SiteNav.tsx =====
+
+"use client";
+import Link from "next/link";
+import { useEffect, useState } from "react";
+import Logo from "./Logo";
+
+const MENU: [string, string][] = [["About", "/#about"], ["Agenda", "/#agenda"], ["Entry", "/#pass"], ["FAQ", "/#faq"], ["My status", "/status"]];
+
+export default function SiteNav({ solid = false }: { solid?: boolean }) {
+  const [scrolled, setScrolled] = useState(false);
+  const [menu, setMenu] = useState(false);
+  useEffect(() => {
+    const f = () => setScrolled(window.scrollY > 40);
+    f(); window.addEventListener("scroll", f, { passive: true });
+    return () => window.removeEventListener("scroll", f);
+  }, []);
+  const bg = solid || scrolled ? "bg-[#0d0f14]/90 backdrop-blur-md border-b border-white/10" : "bg-transparent";
+  return (
+    <header className={`${solid ? "sticky" : "fixed"} inset-x-0 top-0 z-50 transition-colors duration-300 ${bg}`}>
+      <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-5 py-3">
+        <Link href="/" aria-label="re:Invent home"><Logo /></Link>
+        <nav className="flex items-center gap-3 text-sm sm:gap-6">
+          <Link href="/#plan" className="hidden text-slate-200 hover:text-white lg:block">Plan your visit</Link>
+          <Link href="/#agenda" className="hidden text-slate-200 hover:text-white lg:block">Agenda</Link>
+          <div className="relative">
+            <button onClick={() => setMenu(!menu)} className="flex items-center gap-1 text-slate-200 hover:text-white" aria-expanded={menu}>
+              Menu <span className={`text-xs transition ${menu ? "rotate-180" : ""}`}>â–¾</span>
+            </button>
+            {menu && (
+              <div className="absolute right-0 mt-3 w-44 overflow-hidden rounded-xl border border-white/10 bg-[#0d0f14] py-2 shadow-2xl">
+                {MENU.map(([l, h]) => <Link key={l} href={h} onClick={() => setMenu(false)} className="block px-4 py-2 text-slate-200 hover:bg-white/10">{l}</Link>)}
+              </div>
+            )}
+          </div>
+          <Link href="/status" className="hidden text-slate-200 hover:text-white sm:block">Log in</Link>
+          <Link href="/register" className="rounded-full bg-[#02040c] px-5 py-2.5 font-semibold ring-1 ring-white/25 transition hover:ring-white/60">Register now</Link>
+        </nav>
+      </div>
+    </header>
+  );
+}
+
+
+===== components\useSession.ts =====
+
+"use client";
+import { useEffect, useState } from "react";
+import type { Session } from "@supabase/supabase-js";
+import { supabase } from "@/lib/supabase";
+
+export function useSession() {
+  const [session, setSession] = useState<Session | null>(null);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => { setSession(data.session); setLoading(false); });
+    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => setSession(s));
+    return () => sub.subscription.unsubscribe();
+  }, []);
+  return { session, loading };
+}
+
+
+===== lib\config.ts =====
+
+// Edit this file to change event details shown across the site.
+export const EVENT = {
+  name: "AWS re:Invent Party, Mysore",
+  short: "re:Invent Party Mysore",
+  tagline: "Watch re:Invent live with the builder community in Mysore.",
+  dateLabel: "December 2026",          // TODO: exact date, e.g. "Sat, 6 December 2026"
+  startISO: "",                        // TODO: e.g. "2026-12-06T09:00:00+05:30" to show a countdown
+  timeLabel: "Time to be announced",   // TODO
+  city: "Mysore, Karnataka",
+  venue: "Venue to be announced",      // TODO: full venue name + address
+  organiser: "Your organiser / chapter name", // TODO
+  contactEmail: "events@example.com",  // TODO
+  builderIdSignupUrl: "https://profile.aws.amazon.com/", // TODO: confirm official Builder ID signup link
+  officialReinventUrl: "https://aws.amazon.com/events/reinvent/",
+  heroVideo: process.env.NEXT_PUBLIC_HERO_VIDEO_URL || "/videos/hero.mp4",
+};
+
+export const STEPS = [
+  { n: 1, title: "Register", body: "Verify your email with a one-time code and submit your details." },
+  { n: 2, title: "Get confirmed", body: "We confirm your seat and update your status." },
+  { n: 3, title: "Check your status", body: "Sign in anytime to see where your registration stands." },
+];
+
+// Timings are placeholders. Edit freely.
+export const AGENDA = [
+  { time: "9:00 AM", title: "Registration and welcome", detail: "Pick up your badge, grab a coffee and settle in." },
+  { time: "9:45 AM", title: "Opening and community intro", detail: "Meet the organisers and the people building around you." },
+  { time: "10:30 AM", title: "re:Invent keynote screening", detail: "Watch the biggest cloud and AI announcements together." },
+  { time: "12:30 PM", title: "Networking lunch", detail: "Talk through what you just saw with fellow builders." },
+  { time: "1:30 PM", title: "Builder challenge", detail: "A hands-on build session. Team up and make something small and real." },
+  { time: "3:30 PM", title: "Live cloud trivia", detail: "Test your skills. Prizes and swag for the winners." },
+  { time: "4:30 PM", title: "Lightning talks and community Q&A", detail: "Short talks from the community, then open questions." },
+  { time: "5:15 PM", title: "Group photo, swag and wrap-up", detail: "Capture the day and stay connected." },
+];
+
+export const FAQS = [
+  { q: "Is entry free?", a: "Yes, entry is free. Seats are limited, so register early." },
+  { q: "Do I need an AWS Builder ID?", a: "Yes. You can create one for free in about two minutes using the link on the registration page." },
+  { q: "How do I know my seat is confirmed?", a: "Sign in with your email on the status page." },
+  { q: "Who is this for?", a: "Students, developers and anyone curious about cloud and AI." },
+  { q: "Who do I contact for help?", a: `Write to ${EVENT.contactEmail} and we'll get back to you.` },
+];
+
+// Photos: drop files into public/images/ with these names. Missing files show a gradient instead.
+export const IMG = {
+  collage1: "/images/collage-1.jpg", collage2: "/images/collage-2.jpg", collage3: "/images/collage-3.jpg",
+  collage4: "/images/collage-4.jpg", collage5: "/images/collage-5.jpg", collage6: "/images/collage-6.jpg",
+  hero: "/images/hero.jpg",
+  card1: "/images/card-seating.jpg",
+  card2: "/images/card-community.jpg",
+  card3: "/images/card-agenda.jpg",
+  video: "/images/video-poster.jpg",
+  dayBuild: "/images/day-build.jpg",
+  dayLead: "/images/day-lead.jpg",
+  bring1: "/images/bring-1.jpg",
+  bring2: "/images/bring-2.jpg",
+  bring3: "/images/bring-3.jpg",
+  bring4: "/images/bring-4.jpg",
+  interest1: "/images/interest-1.jpg",
+  interest2: "/images/interest-2.jpg",
+  closing: "/images/closing.jpg",
+};
+
+export const CATALOG_URL = "https://reinvent.awsevents.com/";  // TODO: confirm official session catalog link
+
+// Only real quotes you have permission to use. Add more entries to grow the carousel.
+export const TESTIMONIALS = [
+  { quote: "re:Invent is the conference we look forward to most. It brings together an unmatched group of companies and executives, with the opportunity to trade notes with some of the smartest founders in the industry.", author: "2025 Attendee, Startup founder & CEO" },
+];
+
+export const BUILD_ITEMS = [
+  ["Launch sessions", "Hands-on with new services the same day they're announced"],
+  ["Builders' sessions", "One problem, 15 practitioners, candid discussion of what worked and what didn't"],
+  ["Ask the experts", "Direct access to the experts who build, develop, and deploy these services daily. Bring your hardest questions"],
+  ["500-level deep dives", "Go deeper than the documentation by digging into the science and cutting-edge research behind the technology"],
+  ["Industry meetups", "Peers from different industries who solved your challenges a different way"],
+  ["Between sessions", "Drop into the Expo, catch a live demo you didn't plan on, grab a coffee in a community hub"],
+];
+export const LEAD_ITEMS = [
+  ["Keynotes", "Hear where cloud and AI are heading, straight from AWS leadership"],
+  ["Customer stories", "See how real organisations made hard migration and architecture decisions"],
+  ["Strategy sessions", "Working sessions to pressure-test your cloud and AI strategy"],
+  ["Executive meetups", "Trade notes with peers who face the same decisions"],
+  ["Expo", "Meet the partners and tools behind the platforms"],
+];
+
+
+===== lib\supabase.ts =====
+
+import { createClient } from "@supabase/supabase-js";
+
+const url = process.env.NEXT_PUBLIC_SUPABASE_URL || "http://localhost:54321";
+const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "missing-anon-key";
+
+export const supabase = createClient(url, anon);
+
+
+===== supabase\schema.sql =====
+
+-- Run this whole file once in Supabase: SQL Editor > New query > Run.
+
+create table if not exists public.user_roles (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  role text not null check (role in ('admin','moderator')),
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.event_settings (
+  id int primary key default 1 check (id = 1),     -- single row
+  applications_open boolean not null default true,
+  whatsapp_group_url text
+);
+insert into public.event_settings (id) values (1) on conflict do nothing;
+
+create table if not exists public.applications (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null unique references auth.users(id) on delete cascade,
+  email text not null,
+  full_name text not null,
+  builder_id text not null,
+  college text,
+  status text not null default 'pending' check (status in ('pending','accepted','rejected')),
+  submitted_at timestamptz not null default now(),
+  reviewed_by uuid references auth.users(id),
+  reviewed_at timestamptz
+);
+
+create table if not exists public.application_decisions (
+  id uuid primary key default gen_random_uuid(),
+  application_id uuid not null references public.applications(id) on delete cascade,
+  reviewer_id uuid not null references auth.users(id),
+  decision text not null,
+  review_note text,
+  decided_at timestamptz not null default now()
+);
+
+-- Helpers -------------------------------------------------------------
+create or replace function public.is_staff() returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (select 1 from public.user_roles where user_id = auth.uid());
+$$;
+
+create or replace function public.applications_open() returns boolean
+language sql stable security definer set search_path = public as $$
+  select applications_open from public.event_settings where id = 1;
+$$;
+
+-- WhatsApp link is returned ONLY to the user whose application is accepted.
+create or replace function public.get_whatsapp_link() returns text
+language sql stable security definer set search_path = public as $$
+  select s.whatsapp_group_url
+  from public.event_settings s
+  where exists (select 1 from public.applications a where a.user_id = auth.uid() and a.status = 'accepted');
+$$;
+
+create or replace function public.review_application(app_id uuid, new_status text, note text default null)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  if not public.is_staff() then raise exception 'not allowed'; end if;
+  if new_status not in ('accepted','rejected','pending') then raise exception 'bad status'; end if;
+  update public.applications set status = new_status, reviewed_by = auth.uid(), reviewed_at = now() where id = app_id;
+  insert into public.application_decisions (application_id, reviewer_id, decision, review_note)
+  values (app_id, auth.uid(), new_status, note);
+end $$;
+
+-- Row level security ----------------------------------------------------
+alter table public.user_roles enable row level security;
+alter table public.event_settings enable row level security;
+alter table public.applications enable row level security;
+alter table public.application_decisions enable row level security;
+
+-- applicants: read their own row, insert their own row as pending only. No updates.
+create policy "own application read" on public.applications for select using (user_id = auth.uid());
+create policy "staff read all" on public.applications for select using (public.is_staff());
+create policy "own application insert" on public.applications for insert
+  with check (user_id = auth.uid() and status = 'pending' and public.applications_open());
+
+create policy "staff read decisions" on public.application_decisions for select using (public.is_staff());
+create policy "own role read" on public.user_roles for select using (user_id = auth.uid());
+-- event_settings has no policies: clients can't read the WhatsApp link directly (only via get_whatsapp_link()).
+-- Staff edit settings in the Supabase dashboard (Table Editor).
+
+grant execute on function public.is_staff() to authenticated, anon;
+grant execute on function public.applications_open() to authenticated, anon;
+grant execute on function public.get_whatsapp_link() to authenticated;
+grant execute on function public.review_application(uuid, text, text) to authenticated;
+

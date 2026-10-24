@@ -1,0 +1,5 @@
+Drop photos here (from your AWS organiser kit). Names used by the site:
+hero.jpg card-seating.jpg card-speakers.jpg card-agenda.jpg video-poster.jpg
+day-build.jpg day-lead.jpg bring-1.jpg bring-2.jpg bring-3.jpg bring-4.jpg
+interest-1.jpg interest-2.jpg closing.jpg
+Missing files show a purple gradient instead.
