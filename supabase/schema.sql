@@ -79,13 +79,15 @@ $$;
 
 -- Collision-resistant human-readable Attendee ID generator (Format: REIM-XXXXXXXX)
 create or replace function public.generate_attendee_id() returns text
-language plpgsql set search_path = public, pg_temp as $$
+language plpgsql security definer set search_path = public, extensions, pg_temp as $$
 declare
   new_id text;
   done boolean := false;
 begin
   while not done loop
-    new_id := 'REIM-' || upper(substring(encode(gen_random_bytes(4), 'hex') from 1 for 8));
+    -- Uses Postgres core native gen_random_uuid() to extract 8 uppercase hex characters
+    -- Completely native to PG 13+ (no external extension or pgcrypto search_path dependencies)
+    new_id := 'REIM-' || upper(substring(replace(gen_random_uuid()::text, '-', '') from 1 for 8));
     done := not exists (select 1 from public.applications where attendee_id = new_id);
   end loop;
   return new_id;
@@ -102,7 +104,7 @@ $$;
 
 -- Atomically updates status, generates persistent attendee pass on approval, and logs decision
 create or replace function public.review_application(app_id uuid, new_status text, note text default null)
-returns void language plpgsql security definer set search_path = public, pg_temp as $$
+returns void language plpgsql security definer set search_path = public, extensions, pg_temp as $$
 declare
   v_current_status text;
   v_current_attendee_id text;
@@ -123,7 +125,7 @@ begin
   end if;
 
   -- Generate unique persistent attendee_id when approved if none exists yet
-  if new_status = 'accepted' and v_current_attendee_id is null then
+  if new_status = 'accepted' and (v_current_attendee_id is null or trim(v_current_attendee_id) = '') then
     v_current_attendee_id := public.generate_attendee_id();
   end if;
 
@@ -141,7 +143,7 @@ $$;
 
 -- Staff pass recovery RPC
 create or replace function public.generate_missing_pass(app_id uuid)
-returns text language plpgsql security definer set search_path = public, pg_temp as $$
+returns text language plpgsql security definer set search_path = public, extensions, pg_temp as $$
 declare
   v_status text;
   v_attendee_id text;
@@ -157,7 +159,7 @@ begin
   if not found then raise exception 'application not found'; end if;
   if v_status != 'accepted' then raise exception 'application is not accepted'; end if;
 
-  if v_attendee_id is null then
+  if v_attendee_id is null or trim(v_attendee_id) = '' then
     v_attendee_id := public.generate_attendee_id();
     update public.applications
     set attendee_id = v_attendee_id
@@ -170,7 +172,7 @@ $$;
 
 -- Batch backfill RPC for existing accepted applicants
 create or replace function public.backfill_attendee_passes()
-returns integer language plpgsql security definer set search_path = public, pg_temp as $$
+returns integer language plpgsql security definer set search_path = public, extensions, pg_temp as $$
 declare
   v_count integer := 0;
   r record;
@@ -179,7 +181,7 @@ begin
     raise exception 'Unauthorized: Staff permissions required';
   end if;
 
-  for r in select id from public.applications where status = 'accepted' and attendee_id is null loop
+  for r in select id from public.applications where status = 'accepted' and (attendee_id is null or trim(attendee_id) = '') loop
     update public.applications
     set attendee_id = public.generate_attendee_id()
     where id = r.id;

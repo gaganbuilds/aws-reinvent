@@ -151,12 +151,33 @@ begin
 end;
 $$;
 
+-- 6.5. Collision-resistant Attendee ID generator (Format: REIM-XXXXXXXX)
+create or replace function public.generate_attendee_id()
+returns text
+language plpgsql
+security definer
+set search_path = public, extensions, pg_temp
+as $$
+declare
+  new_id text;
+  done boolean := false;
+begin
+  while not done loop
+    -- Uses Postgres core native gen_random_uuid() to extract 8 uppercase hex characters
+    -- Completely native to PG 13+ (no external extension or pgcrypto search_path dependencies)
+    new_id := 'REIM-' || upper(substring(replace(gen_random_uuid()::text, '-', '') from 1 for 8));
+    done := not exists (select 1 from public.applications where attendee_id = new_id);
+  end loop;
+  return new_id;
+end;
+$$;
+
 -- 7. Ensure review_application requires authenticated staff
 create or replace function public.review_application(app_id uuid, new_status text, note text default null)
 returns void
 language plpgsql
 security definer
-set search_path = public, pg_temp
+set search_path = public, extensions, pg_temp
 as $$
 declare
   v_current_status text;
@@ -177,7 +198,7 @@ begin
     raise exception 'application not found';
   end if;
 
-  if new_status = 'accepted' and v_current_attendee_id is null then
+  if new_status = 'accepted' and (v_current_attendee_id is null or trim(v_current_attendee_id) = '') then
     v_current_attendee_id := public.generate_attendee_id();
   end if;
 
@@ -198,7 +219,7 @@ create or replace function public.generate_missing_pass(app_id uuid)
 returns text
 language plpgsql
 security definer
-set search_path = public, pg_temp
+set search_path = public, extensions, pg_temp
 as $$
 declare
   v_status text;
@@ -219,7 +240,7 @@ begin
     raise exception 'application is not accepted';
   end if;
 
-  if v_attendee_id is null then
+  if v_attendee_id is null or trim(v_attendee_id) = '' then
     v_attendee_id := public.generate_attendee_id();
     update public.applications
     set attendee_id = v_attendee_id
@@ -235,7 +256,7 @@ create or replace function public.backfill_attendee_passes()
 returns integer
 language plpgsql
 security definer
-set search_path = public, pg_temp
+set search_path = public, extensions, pg_temp
 as $$
 declare
   v_count integer := 0;
@@ -245,7 +266,7 @@ begin
     raise exception 'Unauthorized: Staff permissions required';
   end if;
 
-  for r in select id from public.applications where status = 'accepted' and attendee_id is null loop
+  for r in select id from public.applications where status = 'accepted' and (attendee_id is null or trim(attendee_id) = '') loop
     update public.applications
     set attendee_id = public.generate_attendee_id()
     where id = r.id;

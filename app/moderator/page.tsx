@@ -34,6 +34,7 @@ export default function ModeratorPage() {
   const [filter, setFilter] = useState("all");
   const [q, setQ] = useState("");
   const [previewPass, setPreviewPass] = useState<Row | null>(null);
+  const [decidingId, setDecidingId] = useState<string | null>(null);
 
   // Sync active tab with URL query parameter if present
   useEffect(() => {
@@ -85,10 +86,25 @@ export default function ModeratorPage() {
   }, [session, load]);
 
   async function decide(id: string, decision: "accepted" | "rejected") {
-    const { error } = await supabase.rpc("review_application", { app_id: id, new_status: decision, note: null });
-    if (error) return toast.error(error.message);
-    toast.success(`Marked ${decision}`);
-    load();
+    if (decidingId) return;
+    setDecidingId(id);
+    try {
+      console.log(`[Moderator] Calling review_application: app_id=${id}, new_status=${decision}`);
+      const { error } = await supabase.rpc("review_application", { app_id: id, new_status: decision, note: null });
+      if (error) {
+        console.error("[Moderator] review_application error:", error);
+        toast.error(`Action failed: ${error.message || `Failed to mark ${decision}`}`, { duration: 7000 });
+        return;
+      }
+      toast.success(decision === "accepted" ? "Application approved & pass generated!" : "Application rejected");
+      await load();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Unexpected error during review";
+      console.error("[Moderator] Unexpected error:", err);
+      toast.error(msg, { duration: 7000 });
+    } finally {
+      setDecidingId(null);
+    }
   }
 
   async function generatePass(appId: string) {
@@ -133,17 +149,67 @@ export default function ModeratorPage() {
   const reviewed = shown.filter((r) => r.status !== "pending");
 
   const renderRow = (r: Row) => (
-    <tr key={r.id}>
-      <td className="px-4 py-3 font-medium text-white">{r.full_name}</td>
-      <td className="px-4 py-3 text-slate-300">{r.email}</td>
-      <td className="px-4 py-3">{r.phone}</td>
-      <td className="px-4 py-3">{r.city}</td>
-      <td className="px-4 py-3">{r.college}</td>
-      <td className="px-4 py-3">{r.year_of_study}</td>
-      <td className="px-4 py-3">{r.branch}</td>
-      <td className="px-4 py-3 font-mono text-xs">{r.builder_id}</td>
-      <td className={`px-4 py-3 font-semibold capitalize ${r.status === "accepted" ? "text-green-400" : r.status === "rejected" ? "text-red-400" : "text-yellow-300"}`}>
-        {r.status}
+    <tr key={r.id} className="hover:bg-white/[0.02] transition">
+      <td className="px-4 py-3 font-medium text-white whitespace-nowrap">
+        <div>{r.full_name}</div>
+        <div className="text-xs text-slate-400 font-normal">{r.email}</div>
+      </td>
+      <td className="px-4 py-3 whitespace-nowrap">
+        <span className={`inline-flex items-center rounded-md px-2.5 py-1 text-xs font-semibold capitalize ${
+          r.status === "accepted" ? "bg-green-500/20 text-green-300 border border-green-500/30"
+          : r.status === "rejected" ? "bg-red-500/20 text-red-300 border border-red-500/30"
+          : "bg-yellow-500/20 text-yellow-300 border border-yellow-500/30"
+        }`}>
+          {r.status}
+        </span>
+      </td>
+      <td className="px-4 py-3 whitespace-nowrap">
+        {r.status === "accepted" ? (
+          <div className="flex items-center gap-2">
+            <span className="inline-flex items-center gap-1 rounded bg-green-500/20 px-2 py-0.5 text-xs font-bold text-green-300 border border-green-500/30">
+              ✓ Approved
+            </span>
+            <button
+              type="button"
+              disabled={decidingId === r.id}
+              onClick={() => decide(r.id, "rejected")}
+              className="text-xs text-red-400 hover:text-red-300 hover:underline"
+              title="Change to Rejected"
+            >
+              Reject
+            </button>
+          </div>
+        ) : r.status === "rejected" ? (
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              disabled={decidingId === r.id}
+              onClick={() => decide(r.id, "accepted")}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-green-600 px-3.5 py-1.5 text-xs font-bold text-white shadow hover:bg-green-500 hover:brightness-110 active:scale-95 transition cursor-pointer"
+            >
+              {decidingId === r.id ? "Saving..." : "✓ Approve / Accept"}
+            </button>
+          </div>
+        ) : (
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              disabled={decidingId === r.id}
+              onClick={() => decide(r.id, "accepted")}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-green-600 px-4 py-2 text-xs font-bold text-white shadow-lg hover:bg-green-500 hover:brightness-110 active:scale-95 transition cursor-pointer"
+            >
+              {decidingId === r.id ? "Saving..." : "✓ Accept / Approve"}
+            </button>
+            <button
+              type="button"
+              disabled={decidingId === r.id}
+              onClick={() => decide(r.id, "rejected")}
+              className="inline-flex items-center gap-1 rounded-lg bg-red-600/80 px-3 py-2 text-xs font-semibold text-white shadow hover:bg-red-600 transition cursor-pointer"
+            >
+              ✕ Reject
+            </button>
+          </div>
+        )}
       </td>
       <td className="px-4 py-3 whitespace-nowrap">
         {r.status === "accepted" ? (
@@ -175,6 +241,11 @@ export default function ModeratorPage() {
           <span className="text-xs text-slate-500">—</span>
         )}
       </td>
+      <td className="px-4 py-3 whitespace-nowrap">{r.phone || "—"}</td>
+      <td className="px-4 py-3">{r.college || "—"}</td>
+      <td className="px-4 py-3 font-mono text-xs whitespace-nowrap">{r.builder_id}</td>
+      <td className="px-4 py-3 whitespace-nowrap">{r.year_of_study || "—"} {r.branch ? `(${r.branch})` : ""}</td>
+      <td className="px-4 py-3 whitespace-nowrap">{r.city || "—"}</td>
       <td className="px-4 py-3 whitespace-nowrap">
         {r.checked_in_at ? (
           <span className="inline-flex items-center gap-1 text-xs font-bold text-green-400">
@@ -183,10 +254,6 @@ export default function ModeratorPage() {
         ) : (
           <span className="text-xs text-slate-500">—</span>
         )}
-      </td>
-      <td className="space-x-2 px-4 py-3 whitespace-nowrap">
-        <button disabled={r.status === "accepted"} onClick={() => decide(r.id, "accepted")} className="rounded bg-green-600 px-3 py-1 text-xs font-semibold text-white disabled:opacity-30">Accept</button>
-        <button disabled={r.status === "rejected"} onClick={() => decide(r.id, "rejected")} className="rounded bg-red-600 px-3 py-1 text-xs font-semibold text-white disabled:opacity-30">Reject</button>
       </td>
     </tr>
   );
@@ -285,17 +352,17 @@ export default function ModeratorPage() {
                     <table className="w-full text-left text-sm">
                       <thead className="bg-panel text-xs uppercase text-slate-400">
                         <tr>
-                          {["Name", "Email", "Phone", "City", "College", "Year", "Branch", "Builder ID", "Status", "Pass / QR", "Checked In", "Actions"].map((h) => (
-                            <th key={h} className="px-4 py-3">{h}</th>
+                          {["Applicant", "Status", "Review Actions", "Pass / QR", "Phone", "College", "Builder ID", "Year & Branch", "City", "Checked In"].map((h) => (
+                            <th key={h} className="px-4 py-3 whitespace-nowrap">{h}</th>
                           ))}
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-line">
-                        {toReview.length > 0 && <tr><td colSpan={12} className="bg-panel px-4 py-2 text-xs font-semibold uppercase tracking-wide text-slate-400">To review ({toReview.length})</td></tr>}
+                        {toReview.length > 0 && <tr><td colSpan={10} className="bg-panel px-4 py-2 text-xs font-semibold uppercase tracking-wide text-yellow-300">To review ({toReview.length})</td></tr>}
                         {toReview.map(renderRow)}
-                        {reviewed.length > 0 && <tr><td colSpan={12} className="border-t-2 border-accent bg-panel px-4 py-2 text-xs font-semibold uppercase tracking-wide text-slate-400">Already reviewed ({reviewed.length})</td></tr>}
+                        {reviewed.length > 0 && <tr><td colSpan={10} className="border-t-2 border-accent bg-panel px-4 py-2 text-xs font-semibold uppercase tracking-wide text-slate-400">Already reviewed ({reviewed.length})</td></tr>}
                         {reviewed.map(renderRow)}
-                        {shown.length === 0 && <tr><td colSpan={12} className="px-4 py-8 text-center text-slate-400">No applications.</td></tr>}
+                        {shown.length === 0 && <tr><td colSpan={10} className="px-4 py-8 text-center text-slate-400">No applications.</td></tr>}
                       </tbody>
                     </table>
                   </div>

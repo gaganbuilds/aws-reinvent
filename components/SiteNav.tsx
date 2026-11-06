@@ -81,6 +81,7 @@ export default function SiteNav({ solid = false }: { solid?: boolean }) {
                   {role === "admin" && (
                     <>
                       <Link href="/admin" onClick={() => setProfile(false)} className={item}>Admin dashboard</Link>
+                      <Link href="/moderator" onClick={() => setProfile(false)} className={item}>📝 Review Applications</Link>
                       <Link href="/admin?tab=scanner" onClick={() => setProfile(false)} className={item}>📷 QR Scanner</Link>
                       <Link href="/admin?tab=records" onClick={() => setProfile(false)} className={item}>📋 Scan Records</Link>
                     </>
