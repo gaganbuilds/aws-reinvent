@@ -15,9 +15,45 @@ export default function OtpLogin({ onDone, title = "Verify your email" }: { onDo
   async function send(e: React.FormEvent) {
     e.preventDefault();
     setBusy(true);
-    const { error } = await supabase.auth.signInWithOtp({ email: email.trim().toLowerCase() });
+    const cleanEmail = email.trim().toLowerCase();
+    const { error } = await supabase.auth.signInWithOtp({
+      email: cleanEmail,
+      options: {
+        shouldCreateUser: true,
+      },
+    });
     setBusy(false);
-    if (error) return toast.error(error.message);
+
+    if (error) {
+      console.error("[Supabase Auth] signInWithOtp failed:", {
+        message: error.message,
+        status: error.status,
+        code: (error as any).code,
+        name: error.name,
+      });
+
+      const status = error.status;
+      const code = (error as { code?: string }).code;
+
+      if (
+        status === 429 ||
+        error.message?.toLowerCase().includes("rate limit") ||
+        code === "over_email_send_rate_limit"
+      ) {
+        return toast.error("Too many OTP requests. Please wait a few minutes and try again.");
+      }
+
+      if (
+        (status !== undefined && status >= 500) ||
+        error.message?.toLowerCase().includes("sending confirmation") ||
+        code === "unexpected_failure"
+      ) {
+        return toast.error("Email service configuration error. Please verify Supabase SMTP / email provider settings.");
+      }
+
+      return toast.error(error.message || "Unable to send verification email. Please try again.");
+    }
+
     setSent(true);
     toast.success("Code sent. Check your inbox (and spam).");
   }
@@ -25,9 +61,25 @@ export default function OtpLogin({ onDone, title = "Verify your email" }: { onDo
   async function verify(e: React.FormEvent) {
     e.preventDefault();
     setBusy(true);
-    const { error } = await supabase.auth.verifyOtp({ email: email.trim().toLowerCase(), token: code.trim(), type: "email" });
+    const cleanEmail = email.trim().toLowerCase();
+    const { error } = await supabase.auth.verifyOtp({
+      email: cleanEmail,
+      token: code.trim(),
+      type: "email",
+    });
     setBusy(false);
-    if (error) return toast.error(error.message);
+
+    if (error) {
+      console.error("[Supabase Auth] verifyOtp failed:", {
+        message: error.message,
+        status: error.status,
+        code: (error as any).code,
+        name: error.name,
+      });
+      return toast.error(error.message || "Invalid or expired verification code. Please try again.");
+    }
+
+    toast.success("Email verified successfully!");
     onDone();
   }
 
